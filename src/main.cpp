@@ -50,6 +50,7 @@ Pushbutton button1(BTN_PIN);
 
 
 // Declare functions prototypes //////////////////////////////////////
+void taskControlLed( void * parameter );
 void taskPZEM( void * parameter );
 void taskDisplay( void * parameter );
 void taskBtn1Read( void * parameter );
@@ -75,6 +76,10 @@ float old_Wh=0;
 //////////////////////////////////////////////////////////////////////
 
 void setup() {
+    // Init build-in LED ///////////////////////////////////////////////
+    pinMode(LED_BUILTIN, OUTPUT);
+    //////////////////////////////////////////////////////////////////////
+
     // Debug serial setup ///////////////////////////////////////////////
 	Serial.begin(9600);
     while(!Serial && !Serial.available()){}
@@ -149,6 +154,13 @@ void setup() {
 
     ArduinoOTA.begin();
 
+    xTaskCreate(taskControlLed,   /* Task function. */
+                "TaskLedBlinker", /* String with name of task. */
+                10000,            /* Stack size in bytes. */
+                NULL,             /* Parameter passed as input of the task */
+                1,                /* Priority of the task. */
+                NULL);            /* Task handle. */
+
     xTaskCreate(taskPZEM,
                 "TaskPZEMRead",
                 10000,
@@ -193,6 +205,16 @@ void setup() {
 }
 
 void loop() {
+    ArduinoOTA.handle();
+}
+
+void taskControlLed( void * parameter ){
+    bool ledstatus = false;
+    while(1){
+        ledstatus = !ledstatus;
+        digitalWrite(LED_BUILTIN, ledstatus);
+        vTaskDelay(1000);
+    }
 }
 
 void taskPZEM( void * parameter ){
@@ -389,7 +411,6 @@ void taskWeb( void * paramter ){
 
 void taskOTA( void * parameter ){
     while(true){
-        ArduinoOTA.handle();
         vTaskDelay(100);
     }
 }
