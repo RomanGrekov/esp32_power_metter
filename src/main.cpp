@@ -7,19 +7,19 @@
 #include <ArduinoLog.h>
 #include "FreeRTOS.h"
 #include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
 #include <ESPmDNS.h>
-#include <WiFiUdp.h>
-#include <ArduinoOTA.h>
+#include <Update.h>
+#include "html.h"
 
 // Replace with your network credentials
-const char* ssid     = "ParkingEVSE";
-const char* password = "120288mu";
-// Set web server port number to 80
-// Set your Static IP address
-IPAddress local_IP(192, 168, 0, 1);
-WiFiServer server(80);
-// Variable to store the HTTP request
-String header;
+const char* host = "esp32";
+//const char* ssid     = "ParkingEVSE";
+//const char* password = "120288mu";
+const char* ssid     = "romang_test";
+const char* password = "romangtest";
+    WebServer server(80);
 //////////////////////////////////////////////////////////////////////
 
 // LCD settings ////////////////////////////////////////////////////
@@ -46,6 +46,9 @@ Pushbutton button1(BTN_PIN);
 
 // Led settings //////////////////////////////////////////////////////
 #define LED_PIN 23
+#define LED_DEFAULT_F 1 // Hz
+#define LED_FILE_UPLOADING_F 100
+int Led_f = LED_DEFAULT_F;
 //////////////////////////////////////////////////////////////////////
 
 
@@ -58,6 +61,8 @@ void taskCurWh( void * parameter );
 void taskWeb( void * parameter );
 void taskOTA( void * parameter );
 void reset_pzem(void);
+void on_ota_start(void);
+void on_ota_end(void);
 //////////////////////////////////////////////////////////////////////
 
 
@@ -73,6 +78,8 @@ float Current=0;
 float Wh=0;
 float cur_Wh=0;
 float old_Wh=0;
+
+TaskHandle_t TaskHandle_LED;
 //////////////////////////////////////////////////////////////////////
 
 void setup() {
@@ -99,67 +106,37 @@ void setup() {
     //////////////////////////////////////////////////////////////////////
 
     // Setup LCD
-    lcd.begin(16, 2);
-    lcd.print("Starting");
+    //lcd.begin(16, 2);
+    //lcd.print("Starting");
     //////////////////////////////////////////////////////////////////////
 
     // Setup Wifi AP /////////////////////////////////////////////////////
-    Log.notice("Start AP"CR);
-    WiFi.softAPConfig(local_IP, local_IP, IPAddress(255, 255, 255, 0));   // subnet FF FF FF 00
-    WiFi.softAP(ssid, password);
-    IPAddress IP = WiFi.softAPIP();
-    lcd.setCursor(0, 0);
-    server.begin();
+    //Log.notice("Start AP"CR);
+    //IPAddress local_IP(192, 168, 0, 1);
+    //WiFi.softAPConfig(local_IP, local_IP, IPAddress(255, 255, 255, 0));   // subnet FF FF FF 00
+    //WiFi.softAP(ssid, password);
+      // Connect to WiFi network
+      WiFi.begin(ssid, password);
+      Serial.println("");
+
+      // Wait for connection
+      while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+      }
+      Serial.println("");
+      Serial.print("Connected to ");
+      Serial.println(ssid);
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
     //////////////////////////////////////////////////////////////////////
 
-    // Setup OTA upgrade
-    // Port defaults to 3232
-    // ArduinoOTA.setPort(3232);
-
-    // Hostname defaults to esp3232-[MAC]
-    // ArduinoOTA.setHostname("myesp32");
-
-    // No authentication by default
-    // ArduinoOTA.setPassword("admin");
-
-    // Password can be set with it's md5 value as well
-    // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
-    // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
-
-    ArduinoOTA
-      .onStart([]() {
-        String type;
-        if (ArduinoOTA.getCommand() == U_FLASH)
-          type = "sketch";
-        else // U_SPIFFS
-          type = "filesystem";
-
-        // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-        Log.notice("Start updating %s", type);
-      })
-      .onEnd([]() {
-        Log.notice("\nEnd");
-      })
-      .onProgress([](unsigned int progress, unsigned int total) {
-        Log.notice("Progress: %d%%\r", (progress / (total / 100)));
-      })
-      .onError([](ota_error_t error) {
-        Log.notice("Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) Log.error("Auth Failed"CR);
-        else if (error == OTA_BEGIN_ERROR) Log.error("Begin Failed"CR);
-        else if (error == OTA_CONNECT_ERROR) Log.error("Connect Failed"CR);
-        else if (error == OTA_RECEIVE_ERROR) Log.error("Receive Failed"CR);
-        else if (error == OTA_END_ERROR) Log.error("End Failed"CR);
-      });
-
-    ArduinoOTA.begin();
-
-    xTaskCreate(taskControlLed,   /* Task function. */
-                "TaskLedBlinker", /* String with name of task. */
-                10000,            /* Stack size in bytes. */
-                NULL,             /* Parameter passed as input of the task */
-                1,                /* Priority of the task. */
-                NULL);            /* Task handle. */
+    xTaskCreate(taskControlLed,
+                "TaskLedBlinker",
+                10000,
+                NULL,
+                1,
+                &TaskHandle_LED);
 
     xTaskCreate(taskPZEM,
                 "TaskPZEMRead",
@@ -205,7 +182,6 @@ void setup() {
 }
 
 void loop() {
-    ArduinoOTA.handle();
 }
 
 void taskControlLed( void * parameter ){
@@ -213,7 +189,7 @@ void taskControlLed( void * parameter ){
     while(1){
         ledstatus = !ledstatus;
         digitalWrite(LED_BUILTIN, ledstatus);
-        vTaskDelay(1000);
+        vTaskDelay(1000/Led_f);
     }
 }
 
@@ -332,8 +308,58 @@ void taskCurWh( void * parameter ){
 }
 
 void taskWeb( void * paramter ){
+    // Variable to store the HTTP request
+    String header;
+
+  /*use mdns for host name resolution*/
+  if (!MDNS.begin(host)) { //http://esp32.local
+    Serial.println("Error setting up MDNS responder!");
+    while (1) {
+      delay(1000);
+    }
+  }
+  Serial.println("mDNS responder started");
+  /*return index page which is stored in serverIndex */
+  server.on("/upgradeindex", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", loginIndex);
+  });
+  server.on("/serverIndex", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", serverIndex);
+  });
+  /*handling uploading firmware file */
+  server.on("/update", HTTP_POST, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
+    ESP.restart();
+  }, []() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        Led_f = LED_FILE_UPLOADING_F;
+        Serial.printf("Update: %s\n", upload.filename.c_str());
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { //start with max available size
+          Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      /* flashing firmware to ESP*/
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      Led_f = LED_DEFAULT_F;
+      if (Update.end(true)) { //true to set the size to the current progress
+        Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+      } else {
+        Update.printError(Serial);
+      }
+    }
+  });
+  server.begin();
 
     while(true){
+        server.handleClient();
+        /*
     // put your main code here, to run repeatedly:
     WiFiClient client = server.available();   // Listen for incoming clients
 
@@ -405,6 +431,7 @@ void taskWeb( void * paramter ){
       // Close the connection
       client.stop();
     }
+    */
     }
 
 }
@@ -426,4 +453,8 @@ void reset_pzem(void){
     digitalWrite(RELAY_PIN, false);
     screen_n = 0;
 
+}
+
+void on_ota_start(void){
+    vTaskSuspend(TaskHandle_LED);
 }
